@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import crypto from "node:crypto";
 import type {
   ElevenLabsWebhookEnvelope,
   ElevenLabsTranscriptEntry,
@@ -10,16 +11,34 @@ import { sendNotification } from "../services/notification.js";
 
 const webhook = new Hono();
 
-/** Validate the webhook secret if configured */
-function isAuthorized(authHeader: string | undefined): boolean {
-  const secret = process.env.WEBHOOK_SECRET;
-  if (!secret) return true; // No secret configured — allow all (dev mode)
-  if (!authHeader) return false;
-  // ElevenLabs sends: "Bearer <secret>" or just the raw secret
-  const token = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : authHeader;
-  return token === secret;
+/** Verify ElevenLabs HMAC webhook signature (format: t=<timestamp>,v0=<hex_hmac>) */
+function verifySignature(
+  rawBody: string,
+  sigHeader: string,
+  secret: string
+): boolean {
+  const parts = sigHeader.split(",");
+  const timestamp = parts.find((p) => p.startsWith("t="))?.slice(2);
+  const signature = parts.find((p) => p.startsWith("v0="));
+
+  if (!timestamp || !signature) return false;
+
+  // Reject timestamps older than 30 minutes
+  const reqTimestamp = Number(timestamp) * 1000;
+  if (reqTimestamp < Date.now() - 30 * 60 * 1000) return false;
+
+  const message = `${timestamp}.${rawBody}`;
+  const expected =
+    "v0=" + crypto.createHmac("sha256", secret).update(message).digest("hex");
+
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expected)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Normalize ElevenLabs transcript entries (handles both legacy and current format) */
@@ -35,12 +54,26 @@ function normalizeTranscript(
 
 /** POST /webhook/call-complete - receives data from ElevenLabs after each call */
 webhook.post("/call-complete", async (c) => {
-  // Verify webhook secret
-  if (!isAuthorized(c.req.header("authorization"))) {
-    return c.json({ status: "error", reason: "unauthorized" }, 401);
+  const secret = process.env.WEBHOOK_SECRET;
+  let envelope: ElevenLabsWebhookEnvelope;
+
+  // Read raw body once (needed for signature verification)
+  const rawBody = await c.req.text();
+
+  if (secret) {
+    const sigHeader = c.req.header("elevenlabs-signature") ?? "";
+    if (!verifySignature(rawBody, sigHeader, secret)) {
+      console.warn("Webhook signature verification failed");
+      return c.json({ status: "error", reason: "invalid_signature" }, 401);
+    }
+    envelope = JSON.parse(rawBody) as ElevenLabsWebhookEnvelope;
+  } else {
+    console.warn(
+      "WEBHOOK_SECRET not set — accepting unverified webhook (dev mode)"
+    );
+    envelope = JSON.parse(rawBody) as ElevenLabsWebhookEnvelope;
   }
 
-  const envelope = await c.req.json<ElevenLabsWebhookEnvelope>();
   const data = envelope.data;
 
   if (!data) {

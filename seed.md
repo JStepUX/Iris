@@ -32,14 +32,17 @@ stack:
 ```yaml
 routing:
   method: AT&T conditional call forwarding
-  activation: "*004*[iris_phone_number]*11#"
-  deactivation: "*73"
+  # Double star registers the number and enables it; a single star only
+  # re-enables an existing registration. Include the leading 1.
+  # Confirmed working 2026-11-14 with **004*18142508008*11#
+  activation: "**004*1[iris_phone_number]*11#"
+  deactivation: "##004#" # untested; replaces "*73", a landline-style code
   conditions:
     - no_answer
     - busy
     - unreachable
   prerequisite: Disable Android Live Voicemail (Settings > Apps > Phone > Live Voicemail)
-  iris_number: TBD # ElevenLabs-provisioned phone number
+  iris_number: "+18142508008" # ElevenLabs agent number, provisioned through Twilio
 ```
 
 ---
